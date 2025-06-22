@@ -1,0 +1,486 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel, ConstantKernel
+from sklearn.model_selection import cross_val_score, LeaveOneOut
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+import pandas as pd
+from scipy.stats import pearsonr
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set style for better plots
+plt.style.use('seaborn-v0_8')
+sns.set_palette("husl")
+
+class CO2UptakeGPR:
+    def __init__(self):
+        self.scaler_X = StandardScaler()
+        self.scaler_y = StandardScaler()
+        self.gpr_uptake = None
+        self.gpr_kinetic = None
+        self.X_train = None
+        self.y_train = None
+        self.sample_names = None
+        
+    def load_data(self, sample_names, bet_area, pore_volume, co2_uptake, kinetic_constant):
+        """Load and prepare the data"""
+        self.sample_names = np.array(sample_names)
+        self.X = np.column_stack([bet_area, pore_volume])
+        self.y_uptake = np.array(co2_uptake)
+        self.y_kinetic = np.array(kinetic_constant)
+        
+        # Create DataFrame for easier handling
+        self.df = pd.DataFrame({
+            'Sample_Name': sample_names,
+            'BET_Area': bet_area,
+            'Pore_Volume': pore_volume,
+            'CO2_Uptake': co2_uptake,
+            'Kinetic_Constant': kinetic_constant
+        })
+        
+        print(f"Data loaded: {len(self.df)} samples")
+        print(f"Sample names: {self.sample_names[:5]}{'...' if len(self.sample_names) > 5 else ''}")
+        print(f"BET Area range: {self.df['BET_Area'].min():.1f} - {self.df['BET_Area'].max():.1f}")
+        print(f"Pore Volume range: {self.df['Pore_Volume'].min():.4f} - {self.df['Pore_Volume'].max():.4f}")
+        print(f"CO2 Uptake range: {self.df['CO2_Uptake'].min():.3f} - {self.df['CO2_Uptake'].max():.3f}")
+        print(f"Kinetic Constant range: {self.df['Kinetic_Constant'].min():.4f} - {self.df['Kinetic_Constant'].max():.4f}")
+        
+    def explore_data(self):
+        """Create comprehensive data exploration plots"""
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # Correlation matrix (excluding sample names)
+        numerical_df = self.df.drop('Sample_Name', axis=1)
+        corr_matrix = numerical_df.corr()
+        sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', center=0, 
+                   ax=axes[0,0], fmt='.3f')
+        axes[0,0].set_title('Correlation Matrix', fontsize=14, fontweight='bold')
+        
+        # Distribution plots
+        for i, col in enumerate(['BET_Area', 'Pore_Volume', 'CO2_Uptake', 'Kinetic_Constant']):
+            if i < 2:
+                ax = axes[0, i+1]
+            else:
+                ax = axes[1, i-2]
+            
+            self.df[col].hist(bins=8, alpha=0.7, ax=ax, color=sns.color_palette()[i])
+            ax.set_title(f'{col} Distribution', fontsize=12, fontweight='bold')
+            ax.set_xlabel(col)
+            ax.set_ylabel('Frequency')
+            ax.grid(True, alpha=0.3)
+        
+        # Scatter plots: inputs vs targets
+        axes[1,2].scatter(self.df['BET_Area'], self.df['CO2_Uptake'], 
+                         alpha=0.7, s=60, label='CO2 Uptake')
+        axes[1,2].scatter(self.df['BET_Area'], self.df['Kinetic_Constant']*10, 
+                         alpha=0.7, s=60, label='Kinetic Const. (×10)')
+        axes[1,2].set_xlabel('BET Area')
+        axes[1,2].set_ylabel('Target Values')
+        axes[1,2].set_title('BET Area vs Targets', fontweight='bold')
+        axes[1,2].legend()
+        axes[1,2].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Additional pairwise relationships with sample labels
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # BET Area vs CO2 Uptake
+        scatter1 = axes[0,0].scatter(self.df['BET_Area'], self.df['CO2_Uptake'], s=60, alpha=0.7)
+        r, p = pearsonr(self.df['BET_Area'], self.df['CO2_Uptake'])
+        axes[0,0].set_title(f'BET Area vs CO2 Uptake (r={r:.3f}, p={p:.3f})', fontweight='bold')
+        axes[0,0].set_xlabel('BET Area (m²/g)')
+        axes[0,0].set_ylabel('CO2 Uptake')
+        axes[0,0].grid(True, alpha=0.3)
+        
+        # Add sample labels for outliers or interesting points
+        for i, txt in enumerate(self.sample_names):
+            if i % 5 == 0:  # Label every 5th point to avoid overcrowding
+                axes[0,0].annotate(txt, (self.df['BET_Area'].iloc[i], self.df['CO2_Uptake'].iloc[i]), 
+                                  xytext=(5, 5), textcoords='offset points', fontsize=8, alpha=0.7)
+        
+        # Pore Volume vs CO2 Uptake
+        axes[0,1].scatter(self.df['Pore_Volume'], self.df['CO2_Uptake'], s=60, alpha=0.7)
+        r, p = pearsonr(self.df['Pore_Volume'], self.df['CO2_Uptake'])
+        axes[0,1].set_title(f'Pore Volume vs CO2 Uptake (r={r:.3f}, p={p:.3f})', fontweight='bold')
+        axes[0,1].set_xlabel('Pore Volume (cm³/g)')
+        axes[0,1].set_ylabel('CO2 Uptake')
+        axes[0,1].grid(True, alpha=0.3)
+        
+        # BET Area vs Kinetic Constant
+        axes[1,0].scatter(self.df['BET_Area'], self.df['Kinetic_Constant'], s=60, alpha=0.7)
+        r, p = pearsonr(self.df['BET_Area'], self.df['Kinetic_Constant'])
+        axes[1,0].set_title(f'BET Area vs Kinetic Constant (r={r:.3f}, p={p:.3f})', fontweight='bold')
+        axes[1,0].set_xlabel('BET Area (m²/g)')
+        axes[1,0].set_ylabel('Kinetic Constant')
+        axes[1,0].grid(True, alpha=0.3)
+        
+        # Pore Volume vs Kinetic Constant
+        axes[1,1].scatter(self.df['Pore_Volume'], self.df['Kinetic_Constant'], s=60, alpha=0.7)
+        r, p = pearsonr(self.df['Pore_Volume'], self.df['Kinetic_Constant'])
+        axes[1,1].set_title(f'Pore Volume vs Kinetic Constant (r={r:.3f}, p={p:.3f})', fontweight='bold')
+        axes[1,1].set_xlabel('Pore Volume (cm³/g)')
+        axes[1,1].set_ylabel('Kinetic Constant')
+        axes[1,1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Display top and bottom performers
+        print("\n=== TOP AND BOTTOM PERFORMERS ===")
+        print("Top 5 CO2 Uptake:")
+        top_uptake = self.df.nlargest(5, 'CO2_Uptake')[['Sample_Name', 'CO2_Uptake', 'BET_Area', 'Pore_Volume']]
+        print(top_uptake.to_string(index=False))
+        
+        print("\nBottom 5 CO2 Uptake:")
+        bottom_uptake = self.df.nsmallest(5, 'CO2_Uptake')[['Sample_Name', 'CO2_Uptake', 'BET_Area', 'Pore_Volume']]
+        print(bottom_uptake.to_string(index=False))
+        
+        print("\nTop 5 Kinetic Constant:")
+        top_kinetic = self.df.nlargest(5, 'Kinetic_Constant')[['Sample_Name', 'Kinetic_Constant', 'BET_Area', 'Pore_Volume']]
+        print(top_kinetic.to_string(index=False))
+    
+    def train_models(self):
+        """Train GPR models for both targets"""
+        # Scale the features
+        X_scaled = self.scaler_X.fit_transform(self.X)
+        
+        # Define kernels - RBF with white noise
+        kernel_uptake = ConstantKernel(1.0) * RBF(length_scale=10.0) + WhiteKernel(noise_level=0.1)
+        kernel_kinetic = ConstantKernel(1.0) * RBF(length_scale=10.0) + WhiteKernel(noise_level=0.1)
+        
+        # Initialize and train GPR models
+        self.gpr_uptake = GaussianProcessRegressor(
+            kernel=kernel_uptake, 
+            alpha=1e-6, 
+            normalize_y=True,
+            n_restarts_optimizer=10
+        )
+        
+        self.gpr_kinetic = GaussianProcessRegressor(
+            kernel=kernel_kinetic, 
+            alpha=1e-6, 
+            normalize_y=True,
+            n_restarts_optimizer=10
+        )
+        
+        # Fit models
+        self.gpr_uptake.fit(X_scaled, self.y_uptake)
+        self.gpr_kinetic.fit(X_scaled, self.y_kinetic)
+        
+        print("Models trained successfully!")
+        print(f"CO2 Uptake model kernel: {self.gpr_uptake.kernel_}")
+        print(f"Kinetic Constant model kernel: {self.gpr_kinetic.kernel_}")
+        
+    def cross_validate(self):
+        """Perform cross-validation"""
+        X_scaled = self.scaler_X.transform(self.X)
+        
+        # Leave-One-Out CV for small dataset
+        loo = LeaveOneOut()
+        
+        # CV scores for CO2 uptake
+        cv_scores_uptake = cross_val_score(self.gpr_uptake, X_scaled, self.y_uptake, 
+                                          cv=loo, scoring='r2')
+        
+        # CV scores for kinetic constant
+        cv_scores_kinetic = cross_val_score(self.gpr_kinetic, X_scaled, self.y_kinetic, 
+                                           cv=loo, scoring='r2')
+        
+        print(f"\nCross-Validation Results (Leave-One-Out):")
+        print(f"CO2 Uptake - Mean R²: {cv_scores_uptake.mean():.3f} ± {cv_scores_uptake.std():.3f}")
+        print(f"Kinetic Constant - Mean R²: {cv_scores_kinetic.mean():.3f} ± {cv_scores_kinetic.std():.3f}")
+        
+        return cv_scores_uptake, cv_scores_kinetic
+    
+    def plot_predictions(self):
+        """Plot actual vs predicted values with uncertainty"""
+        X_scaled = self.scaler_X.transform(self.X)
+        
+        # Predictions with uncertainty
+        y_pred_uptake, y_std_uptake = self.gpr_uptake.predict(X_scaled, return_std=True)
+        y_pred_kinetic, y_std_kinetic = self.gpr_kinetic.predict(X_scaled, return_std=True)
+        
+        fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # CO2 Uptake predictions
+        axes[0].scatter(self.y_uptake, y_pred_uptake, alpha=0.7, s=60)
+        axes[0].errorbar(self.y_uptake, y_pred_uptake, yerr=y_std_uptake, 
+                        fmt='none', alpha=0.5, capsize=3)
+        
+        # Perfect prediction line
+        min_val, max_val = min(self.y_uptake.min(), y_pred_uptake.min()), max(self.y_uptake.max(), y_pred_uptake.max())
+        axes[0].plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8, linewidth=2)
+        
+        r2_uptake = r2_score(self.y_uptake, y_pred_uptake)
+        rmse_uptake = np.sqrt(mean_squared_error(self.y_uptake, y_pred_uptake))
+        axes[0].set_title(f'CO2 Uptake Predictions\nR² = {r2_uptake:.3f}, RMSE = {rmse_uptake:.3f}', 
+                         fontweight='bold')
+        axes[0].set_xlabel('Actual CO2 Uptake')
+        axes[0].set_ylabel('Predicted CO2 Uptake')
+        axes[0].grid(True, alpha=0.3)
+        
+        # Kinetic Constant predictions
+        axes[1].scatter(self.y_kinetic, y_pred_kinetic, alpha=0.7, s=60)
+        axes[1].errorbar(self.y_kinetic, y_pred_kinetic, yerr=y_std_kinetic, 
+                        fmt='none', alpha=0.5, capsize=3)
+        
+        # Perfect prediction line
+        min_val, max_val = min(self.y_kinetic.min(), y_pred_kinetic.min()), max(self.y_kinetic.max(), y_pred_kinetic.max())
+        axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8, linewidth=2)
+        
+        r2_kinetic = r2_score(self.y_kinetic, y_pred_kinetic)
+        rmse_kinetic = np.sqrt(mean_squared_error(self.y_kinetic, y_pred_kinetic))
+        axes[1].set_title(f'Kinetic Constant Predictions\nR² = {r2_kinetic:.3f}, RMSE = {rmse_kinetic:.4f}', 
+                         fontweight='bold')
+        axes[1].set_xlabel('Actual Kinetic Constant')
+        axes[1].set_ylabel('Predicted Kinetic Constant')
+        axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+        return r2_uptake, rmse_uptake, r2_kinetic, rmse_kinetic
+    
+    def plot_response_surfaces(self):
+        """Plot 3D response surfaces showing how predictions vary with inputs"""
+        # Create grid for surface plots
+        bet_range = np.linspace(self.df['BET_Area'].min(), self.df['BET_Area'].max(), 50)
+        pv_range = np.linspace(self.df['Pore_Volume'].min(), self.df['Pore_Volume'].max(), 50)
+        BET_grid, PV_grid = np.meshgrid(bet_range, pv_range)
+        
+        # Prepare grid points for prediction
+        grid_points = np.column_stack([BET_grid.ravel(), PV_grid.ravel()])
+        grid_scaled = self.scaler_X.transform(grid_points)
+        
+        # Predictions
+        uptake_pred, uptake_std = self.gpr_uptake.predict(grid_scaled, return_std=True)
+        kinetic_pred, kinetic_std = self.gpr_kinetic.predict(grid_scaled, return_std=True)
+        
+        # Reshape for contour plots
+        uptake_surface = uptake_pred.reshape(BET_grid.shape)
+        kinetic_surface = kinetic_pred.reshape(BET_grid.shape)
+        uptake_uncertainty = uptake_std.reshape(BET_grid.shape)
+        kinetic_uncertainty = kinetic_std.reshape(BET_grid.shape)
+        
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # CO2 Uptake surface
+        cs1 = axes[0,0].contourf(BET_grid, PV_grid, uptake_surface, levels=20, cmap='viridis')
+        axes[0,0].scatter(self.df['BET_Area'], self.df['Pore_Volume'], 
+                         c=self.df['CO2_Uptake'], s=60, cmap='viridis', edgecolors='white')
+        axes[0,0].set_title('CO2 Uptake Response Surface', fontweight='bold')
+        axes[0,0].set_xlabel('BET Area (m²/g)')
+        axes[0,0].set_ylabel('Pore Volume (cm³/g)')
+        plt.colorbar(cs1, ax=axes[0,0], label='CO2 Uptake')
+        
+        # CO2 Uptake uncertainty
+        cs2 = axes[0,1].contourf(BET_grid, PV_grid, uptake_uncertainty, levels=20, cmap='Reds')
+        axes[0,1].scatter(self.df['BET_Area'], self.df['Pore_Volume'], 
+                         c='white', s=60, edgecolors='black')
+        axes[0,1].set_title('CO2 Uptake Prediction Uncertainty', fontweight='bold')
+        axes[0,1].set_xlabel('BET Area (m²/g)')
+        axes[0,1].set_ylabel('Pore Volume (cm³/g)')
+        plt.colorbar(cs2, ax=axes[0,1], label='Standard Deviation')
+        
+        # Kinetic Constant surface
+        cs3 = axes[1,0].contourf(BET_grid, PV_grid, kinetic_surface, levels=20, cmap='plasma')
+        axes[1,0].scatter(self.df['BET_Area'], self.df['Pore_Volume'], 
+                         c=self.df['Kinetic_Constant'], s=60, cmap='plasma', edgecolors='white')
+        axes[1,0].set_title('Kinetic Constant Response Surface', fontweight='bold')
+        axes[1,0].set_xlabel('BET Area (m²/g)')
+        axes[1,0].set_ylabel('Pore Volume (cm³/g)')
+        plt.colorbar(cs3, ax=axes[1,0], label='Kinetic Constant')
+        
+        # Kinetic Constant uncertainty
+        cs4 = axes[1,1].contourf(BET_grid, PV_grid, kinetic_uncertainty, levels=20, cmap='Reds')
+        axes[1,1].scatter(self.df['BET_Area'], self.df['Pore_Volume'], 
+                         c='white', s=60, edgecolors='black')
+        axes[1,1].set_title('Kinetic Constant Prediction Uncertainty', fontweight='bold')
+        axes[1,1].set_xlabel('BET Area (m²/g)')
+        axes[1,1].set_ylabel('Pore Volume (cm³/g)')
+        plt.colorbar(cs4, ax=axes[1,1], label='Standard Deviation')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def predict_new_sample(self, bet_area, pore_volume):
+        """Predict properties for new samples"""
+        X_new = np.array([[bet_area, pore_volume]])
+        X_new_scaled = self.scaler_X.transform(X_new)
+        
+        uptake_pred, uptake_std = self.gpr_uptake.predict(X_new_scaled, return_std=True)
+        kinetic_pred, kinetic_std = self.gpr_kinetic.predict(X_new_scaled, return_std=True)
+        
+        print(f"\nPrediction for BET Area = {bet_area}, Pore Volume = {pore_volume}:")
+        print(f"CO2 Uptake: {uptake_pred[0]:.3f} ± {uptake_std[0]:.3f}")
+        print(f"Kinetic Constant: {kinetic_pred[0]:.4f} ± {kinetic_std[0]:.4f}")
+        
+        return uptake_pred[0], uptake_std[0], kinetic_pred[0], kinetic_std[0]
+
+# Function to load data from CSV file
+def load_csv_data(file_path):
+    """
+    Load data from CSV file with the following expected format:
+    
+    CSV Format:
+    Row 1 (Header): Sample_Name,BET_Area,Pore_Volume,CO2_Uptake,Kinetic_Constant
+    Row 2-31: sample names and numerical values for each variable
+    
+    Parameters:
+    file_path: path to your CSV file
+    
+    Returns:
+    sample_names, bet_area, pore_volume, co2_uptake, kinetic_constant arrays
+    """
+    try:
+        # Read CSV file
+        df = pd.read_csv(file_path)
+        
+        print("CSV file loaded successfully!")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        print("\nFirst few rows:")
+        print(df.head())
+        
+        # Check if we have the expected number of columns
+        if df.shape[1] < 5:
+            print(f"Error: Expected at least 5 columns, but found {df.shape[1]}")
+            print("Expected columns: Sample_Name, BET_Area, Pore_Volume, CO2_Uptake, Kinetic_Constant")
+            return None, None, None, None, None
+        
+        # Extract data (assuming columns are in order: Sample_Name, BET_Area, Pore_Volume, CO2_Uptake, Kinetic_Constant)
+        sample_names = df.iloc[:, 0].values  # First column - Sample names
+        bet_area = df.iloc[:, 1].values  # Second column - BET Area
+        pore_volume = df.iloc[:, 2].values  # Third column - Pore Volume
+        co2_uptake = df.iloc[:, 3].values  # Fourth column - CO2 Uptake
+        kinetic_constant = df.iloc[:, 4].values  # Fifth column - Kinetic Constant
+        
+        # Convert to numeric, handling any non-numeric values
+        try:
+            bet_area = pd.to_numeric(bet_area, errors='coerce')
+            pore_volume = pd.to_numeric(pore_volume, errors='coerce')
+            co2_uptake = pd.to_numeric(co2_uptake, errors='coerce')
+            kinetic_constant = pd.to_numeric(kinetic_constant, errors='coerce')
+        except Exception as e:
+            print(f"Error converting to numeric: {e}")
+            return None, None, None, None, None
+        
+        # Check for any missing values in numerical columns
+        numerical_data = np.column_stack([bet_area, pore_volume, co2_uptake, kinetic_constant])
+        missing_mask = pd.isna(numerical_data).any(axis=1)
+        
+        if missing_mask.sum() > 0:
+            print(f"\nWarning: Found {missing_mask.sum()} rows with missing values:")
+            missing_rows = df[missing_mask]
+            print(missing_rows)
+            
+            # Remove rows with missing values
+            valid_mask = ~missing_mask
+            sample_names = sample_names[valid_mask]
+            bet_area = bet_area[valid_mask]
+            pore_volume = pore_volume[valid_mask]
+            co2_uptake = co2_uptake[valid_mask]
+            kinetic_constant = kinetic_constant[valid_mask]
+            
+            print(f"Continuing with {len(sample_names)} valid samples after removing missing data.")
+        
+        # Final validation
+        if len(sample_names) < 5:
+            print("Error: Too few valid samples after cleaning. Need at least 5 samples.")
+            return None, None, None, None, None
+            
+        return sample_names, bet_area, pore_volume, co2_uptake, kinetic_constant
+        
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found.")
+        print("Please check the file path and make sure the file exists.")
+        return None, None, None, None, None
+        
+    except pd.errors.EmptyDataError:
+        print("Error: The CSV file is empty.")
+        return None, None, None, None, None
+        
+    except Exception as e:
+        print(f"Error loading CSV file: {e}")
+        print("\nPlease ensure your CSV file has the following format:")
+        print("Column 1: Sample Name (e.g., Sample_1, MOF-5, etc.)")
+        print("Column 2: BET Area (m²/g)")
+        print("Column 3: Total Pore Volume (cm³/g)")
+        print("Column 4: CO2 Uptake at 400 ppm")
+        print("Column 5: Kinetic Constant")
+        print("Row 1: Headers (Sample_Name,BET_Area,Pore_Volume,CO2_Uptake,Kinetic_Constant)")
+        print("Rows 2-31: Your 30 data points")
+        return None, None, None, None, None
+
+# Example usage with synthetic data (for demonstration if no CSV file provided)
+def generate_example_data():
+    """Generate example data for demonstration"""
+    np.random.seed(42)
+    n_samples = 30
+    
+    # Generate synthetic but realistic data
+    bet_area = np.random.uniform(100, 1500, n_samples)
+    pore_volume = np.random.uniform(0.1, 1.5, n_samples)
+    
+    # Create realistic relationships
+    co2_uptake = (0.002 * bet_area + 0.5 * pore_volume + 
+                  np.random.normal(0, 0.1, n_samples))
+    kinetic_constant = (0.0001 * bet_area + 0.02 * pore_volume + 
+                       np.random.normal(0, 0.005, n_samples))
+    
+    return bet_area, pore_volume, co2_uptake, kinetic_constant
+
+if __name__ == "__main__":
+    # Initialize the analyzer
+    analyzer = CO2UptakeGPR()
+    
+    # OPTION 1: Load your CSV data (RECOMMENDED)
+    # Update this path to your CSV file location
+    file_path = 'Isotherm_Uptake_Prediction/Isotherm_prediction_data.csv'
+    
+    # Try to load CSV data first
+    sample_names, bet_area, pore_volume, co2_uptake, kinetic_constant = load_csv_data(file_path)
+    
+    # OPTION 2: If CSV loading fails, ask user for file path
+    if bet_area is None:
+        print("\nFailed to load data from default path.")
+        user_path = input("Please enter the full path to your CSV file: ")
+        sample_names, bet_area, pore_volume, co2_uptake, kinetic_constant = load_csv_data(user_path)
+    
+    # OPTION 3: If still no data, use example data
+    if bet_area is None:
+        print("\nStill no data loaded. Using example data for demonstration...")
+        bet_area, pore_volume, co2_uptake, kinetic_constant = generate_example_data()
+        sample_names = [f"Sample_{i+1}" for i in range(len(bet_area))]
+    
+    # Load data into analyzer
+    analyzer.load_data(sample_names, bet_area, pore_volume, co2_uptake, kinetic_constant)
+
+    # Explore the data
+    print("=== DATA EXPLORATION ===")
+    analyzer.explore_data()
+    
+    # Train models
+    print("\n=== MODEL TRAINING ===")
+    analyzer.train_models()
+    
+    # Cross-validation
+    print("\n=== CROSS-VALIDATION ===")
+    cv_uptake, cv_kinetic = analyzer.cross_validate()
+    
+    # Plot predictions
+    print("\n=== MODEL EVALUATION ===")
+    r2_uptake, rmse_uptake, r2_kinetic, rmse_kinetic = analyzer.plot_predictions()
+    
+    # Plot response surfaces
+    print("\n=== RESPONSE SURFACES ===")
+    analyzer.plot_response_surfaces()
+    
+    # Example prediction
+    print("\n=== EXAMPLE PREDICTION ===")
+    analyzer.predict_new_sample(800, 0.8)
