@@ -243,7 +243,7 @@ If you use this tool in your research, please cite:
 ```bibtex
 @software{co2_uptake_gpr,
   title={CO2 Uptake Gaussian Process Regression Analysis Tool},
-  author={Your Name},
+  author={Tristan Spreng},
   year={2025},
   url={https://github.com/your-repo/co2-uptake-gpr}
 }
